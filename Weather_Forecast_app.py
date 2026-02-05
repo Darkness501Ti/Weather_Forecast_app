@@ -8,7 +8,6 @@ from tkinter import messagebox, ttk
 
 '''
 
-
                   Disclaimer
 
 This project in only for Study Purpose
@@ -17,7 +16,6 @@ this project Only forecast in Thailand and hourly only
 
 API by Thai Meteorological Department
 API Document "https://data.tmd.go.th/nwpapi/doc/"
-
 
 '''
 
