@@ -21,7 +21,6 @@ API Document "https://data.tmd.go.th/nwpapi/doc/"
 Download Weather_Forecast_app.exe in release page --> https://github.com/Darkness501Ti/Weather_Forecast_app/releases 
 
 - Open the Weather_Forecast_app.exe and Insert the API key / Latitude / Longitude
-- Demo for API key https://github.com/Darkness501Ti/Weather_Forecast_app/blob/main/Demo_API_key.txt
 
  
 ![image](https://github.com/Darkness501Ti/Weather_Forecast_app/blob/0261263487e5af4d30dece83cd354f00aaabf34f/demo_01.png)
