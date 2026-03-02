@@ -15,10 +15,24 @@ API Document "https://data.tmd.go.th/nwpapi/doc/"
 
 
 ---
+📱 **V1 vs V2 - What's New?**
 
+V1: Basic weather app (1 location)
+V2: Enhanced app (unlimited locations + Google Maps + better design)
+
+Choose V2 for the best experience!
+---
+
+## get started
+
+download Weather_Forecast_app_V2.exe in release page --> https://github.com/Darkness501Ti/Weather_Forecast_app/releases 
+
+
+
+
+
+(V1 old version)
 # HOW TO USE
-
-Download Weather_Forecast_app.exe in release page --> https://github.com/Darkness501Ti/Weather_Forecast_app/releases 
 
 - Open the Weather_Forecast_app.exe and Insert the API key / Latitude / Longitude
 
