@@ -310,7 +310,13 @@ def extract_lat_lon_from_google_maps(url: str):
 
 
 def setup_logging():
-    """Configure logging with rotation for debug mode"""
+    """Configure logging with rotation for debug mode (optional)"""
+    settings = load_settings()
+    debug_mode = settings.get("debug_mode", False)
+    
+    if not debug_mode:
+        return  # Skip logging setup if debug mode is disabled
+    
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     
@@ -330,12 +336,16 @@ def setup_logging():
     logger.addHandler(handler)
 
 def log_debug(message):
-    """Log debug message to file"""
-    try:
-        logging.info(message)
-        print(f"LOG: {message}")
-    except:
-        pass
+    """Log debug message to file (optional)"""
+    settings = load_settings()
+    debug_mode = settings.get("debug_mode", False)
+    
+    if debug_mode:
+        try:
+            logging.info(message)
+            print(f"LOG: {message}")
+        except:
+            pass
 
 def load_settings():
     """Load settings from JSON file with file locking and API key decryption"""
@@ -805,8 +815,30 @@ def update_location_dropdown():
     location_dropdown['values'] = [display_text for display_text, slot_name in locations]
 
 
+def toggle_debug_mode():
+    """Handle debug mode toggle"""
+    settings = load_settings()
+    settings["debug_mode"] = debug_mode_var.get()
+    save_settings(settings)
+    
+    if debug_mode_var.get():
+        setup_logging()  # Enable logging
+        messagebox.showinfo("Debug Mode", "Debug mode enabled. Logs will be saved to 'weather_app.log'")
+    else:
+        # Disable logging by clearing handlers
+        logger = logging.getLogger()
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        messagebox.showinfo("Debug Mode", "Debug mode disabled. Logging stopped.")
+
 def show_log_viewer():
-    """Show log viewer window"""
+    settings = load_settings()
+    debug_mode = settings.get("debug_mode", False)
+    
+    if not debug_mode:
+        messagebox.showinfo("Debug Mode", "Debug mode is disabled. Enable it in settings to view logs.")
+        return
+    
     log_window = tk.Toplevel(root)
     log_window.title("Debug Logs")
     log_window.geometry("800x400")
@@ -855,6 +887,7 @@ google_maps_url_var = tk.StringVar(value="")
 location_name_var = tk.StringVar(value="")
 daily_hourly_var = tk.StringVar(value=saved_data.get("mode", "daily"))
 location_dropdown_var = tk.StringVar(value="Custom")
+debug_mode_var = tk.BooleanVar(value=saved_data.get("debug_mode", False))
 
 #--------------------Settings Frame--------------------
 settings_frame = tk.LabelFrame(root, text=" Settings ", padx=15, pady=15)
@@ -914,6 +947,16 @@ entry_api_key.grid(row=5, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
 api_help_btn = tk.Button(settings_frame, text="How to get API key", command=show_How_to_get_API_key, bg="#f0f0f0", font=("Arial", 8))
 api_help_btn.grid(row=5, column=3, padx=5, pady=5)
 
+# Debug mode and log viewer
+debug_frame = tk.Frame(settings_frame)
+debug_frame.grid(row=6, column=0, columnspan=4, padx=10, pady=10, sticky="ew")
+
+debug_checkbox = tk.Checkbutton(debug_frame, text="Enable Debug Mode", variable=debug_mode_var, command=toggle_debug_mode, font=("Arial", 9))
+debug_checkbox.pack(side="left", padx=(0,10))
+
+log_viewer_btn = tk.Button(debug_frame, text="View Logs", command=show_log_viewer, bg="#E0E0E0", font=("Arial", 8))
+log_viewer_btn.pack(side="left")
+
 #--------------------Buttons Frame--------------------
 buttons_frame = tk.Frame(root)
 buttons_frame.pack(pady=10)
@@ -964,6 +1007,7 @@ def on_closing():
     settings["current_lon"] = lon_var.get()
     settings["api_key"] = api_key_var.get()
     settings["mode"] = daily_hourly_var.get()
+    settings["debug_mode"] = debug_mode_var.get()
     save_settings(settings)
     root.destroy()
 
