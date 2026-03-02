@@ -106,9 +106,144 @@ from tkinter import messagebox, ttk
 import re
 import logging
 from datetime import datetime
+import base64
+import hashlib
+from cryptography.fernet import Fernet
+import threading
+import msvcrt  # Windows file locking
+from logging.handlers import RotatingFileHandler
 
 CONFIG_FILE = "settings.json"
 LOG_FILE = "weather_app.log"
+ENCRYPTION_KEY_FILE = ".encryption_key"
+MAX_LOG_SIZE = 1024 * 1024  # 1MB
+BACKUP_COUNT = 3
+REQUEST_TIMEOUT = 10  # seconds
+
+
+class FileLock:
+    """Context manager for file locking (Windows compatible)"""
+    def __init__(self, file_path, mode='r'):
+        self.file_path = file_path
+        self.mode = mode
+        self.file = None
+        self.lock_file = None
+    
+    def __enter__(self):
+        # Create lock file path
+        self.lock_file = self.file_path + '.lock'
+        
+        # Wait for lock to be available (Windows compatible)
+        max_wait = 30  # Maximum wait time in seconds
+        wait_time = 0
+        while wait_time < max_wait:
+            try:
+                # Try to create lock file exclusively
+                self.lock_file_handle = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except OSError:
+                # Lock file exists, wait and retry
+                import time
+                time.sleep(0.1)
+                wait_time += 0.1
+        
+        if wait_time >= max_wait:
+            raise TimeoutError("Could not acquire file lock")
+        
+        # Open the actual file
+        self.file = open(self.file_path, self.mode)
+        return self.file
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.file:
+            self.file.close()
+        # Close and remove lock file
+        try:
+            os.close(self.lock_file_handle)
+            os.unlink(self.lock_file)
+        except:
+            pass
+
+
+def get_or_create_encryption_key():
+    """Get or create encryption key for API keys"""
+    if os.path.exists(ENCRYPTION_KEY_FILE):
+        with open(ENCRYPTION_KEY_FILE, 'rb') as f:
+            return f.read()
+    else:
+        key = Fernet.generate_key()
+        with open(ENCRYPTION_KEY_FILE, 'wb') as f:
+            f.write(key)
+        return key
+
+
+def encrypt_api_key(api_key):
+    """Encrypt API key"""
+    if not api_key:
+        return ""
+    key = get_or_create_encryption_key()
+    f = Fernet(key)
+    return f.encrypt(api_key.encode()).decode()
+
+
+def decrypt_api_key(encrypted_key):
+    """Decrypt API key"""
+    if not encrypted_key:
+        return ""
+    try:
+        key = get_or_create_encryption_key()
+        f = Fernet(key)
+        return f.decrypt(encrypted_key.encode()).decode()
+    except Exception:
+        return ""  # Return empty if decryption fails
+
+
+def validate_coordinates(lat_str, lon_str):
+    """Validate and convert coordinate strings"""
+    try:
+        lat = float(lat_str)
+        lon = float(lon_str)
+        
+        if not (-90 <= lat <= 90):
+            raise ValueError("Latitude must be between -90 and 90")
+        if not (-180 <= lon <= 180):
+            raise ValueError("Longitude must be between -180 and 180")
+            
+        return lat, lon
+    except ValueError as e:
+        raise ValueError(f"Invalid coordinates: {e}")
+
+
+def get_weather_condition_map():
+    """Get weather condition mapping"""
+    return {
+        1: "Clear", 2: "Partly cloudy", 3: "Cloudy", 4: "Overcast", 5: "Light rain", 
+        6: "Moderate rain", 7: "Heavy rain", 8: "Thunderstorm", 9: "Very cold", 
+        10: "Cold", 11: "Cool", 12: "Very hot"
+    }
+
+
+def make_api_request(url, headers=None, params=None):
+    """Make API request with consistent timeout and error handling"""
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.Timeout:
+        raise requests.RequestException("Request timed out. Please check your internet connection.")
+    except requests.exceptions.ConnectionError:
+        raise requests.RequestException("Network connection error. Please check your internet.")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            raise requests.RequestException("Invalid API token. Please check your API key.")
+        elif e.response.status_code == 403:
+            raise requests.RequestException("API access forbidden. Please check your permissions.")
+        elif e.response.status_code == 429:
+            raise requests.RequestException("API rate limit exceeded. Please try again later.")
+        else:
+            raise requests.RequestException(f"HTTP {e.response.status_code}: {e.response.reason}")
+    except requests.exceptions.RequestException as e:
+        raise requests.RequestException(f"Request failed: {str(e)}")
 
 
 
@@ -132,9 +267,10 @@ def extract_lat_lon_from_google_maps(url: str):
 
     # Expand short URL if needed (maps.app.goo.gl etc.)
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = requests.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
         final_url = response.url
-    except:
+    except requests.exceptions.RequestException as e:
+        log_debug(f"Failed to expand URL: {e}")
         final_url = url  # fallback
 
     # Pattern 1: @lat,lon
@@ -174,13 +310,24 @@ def extract_lat_lon_from_google_maps(url: str):
 
 
 def setup_logging():
-    """Configure logging for debug mode"""
-    logging.basicConfig(
-        filename=LOG_FILE,
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        filemode='a'
+    """Configure logging with rotation for debug mode"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Create rotating file handler
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=MAX_LOG_SIZE,
+        backupCount=BACKUP_COUNT,
+        encoding='utf-8'
     )
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 def log_debug(message):
     """Log debug message to file"""
@@ -191,10 +338,10 @@ def log_debug(message):
         pass
 
 def load_settings():
-    """Load settings from JSON file"""
+    """Load settings from JSON file with file locking and API key decryption"""
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with FileLock(CONFIG_FILE, 'r') as f:
                 settings = json.load(f)
                 
             # Migrate old settings format to new format
@@ -214,10 +361,20 @@ def load_settings():
                 settings["locations"] = {"saved_locations": saved_locations}
                 save_settings(settings)
                 log_debug("Migrated settings from old format to new format")
+            
+            # Decrypt API key if it's encrypted
+            if "api_key" in settings and settings["api_key"]:
+                settings["api_key"] = decrypt_api_key(settings["api_key"])
                 
             return settings
-        except Exception as e:
+            
+        except (json.JSONDecodeError, IOError, TimeoutError) as e:
             log_debug(f"Error loading settings: {e}")
+            messagebox.showerror("Settings Error", f"Failed to load settings: {e}")
+        except TimeoutError as e:
+            log_debug(f"Timeout loading settings: {e}")
+            messagebox.showerror("Settings Error", "Settings file is locked by another process. Please try again.")
+        
     return {
         "api_key": "",
         "mode": "daily",
@@ -230,29 +387,53 @@ def load_settings():
     }
 
 def save_settings(settings):
-    """Save settings to JSON file"""
+    """Save settings to JSON file with file locking and API key encryption"""
     try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(settings, f, indent=2)
+        # Create a copy of settings to avoid modifying the original
+        settings_copy = settings.copy()
+        
+        # Encrypt API key before saving
+        if "api_key" in settings_copy and settings_copy["api_key"]:
+            settings_copy["api_key"] = encrypt_api_key(settings_copy["api_key"])
+        
+        with FileLock(CONFIG_FILE, 'w') as f:
+            json.dump(settings_copy, f, indent=2)
         log_debug("Settings saved successfully")
-    except Exception as e:
+        
+    except (IOError, TimeoutError) as e:
         log_debug(f"Error saving settings: {e}")
-        messagebox.showerror("Error", f"Failed to save settings: {e}")
+        messagebox.showerror("Settings Error", f"Failed to save settings: {e}")
+    except Exception as e:
+        log_debug(f"Unexpected error saving settings: {e}")
+        messagebox.showerror("Settings Error", f"Unexpected error: {e}")
 
 
 def save_location(name, lat, lon, url=""):
-    """Save location to the list"""
-    settings = load_settings()
-    new_location = {
-        "name": name,
-        "lat": float(lat),
-        "lon": float(lon),
-        "url": url
-    }
-    settings["locations"]["saved_locations"].append(new_location)
-    save_settings(settings)
-    log_debug(f"Saved location '{name}'")
-    return True
+    """Save location to the list with validation"""
+    try:
+        # Validate coordinates
+        lat_float, lon_float = validate_coordinates(str(lat), str(lon))
+        
+        settings = load_settings()
+        new_location = {
+            "name": name,
+            "lat": lat_float,
+            "lon": lon_float,
+            "url": url
+        }
+        settings["locations"]["saved_locations"].append(new_location)
+        save_settings(settings)
+        log_debug(f"Saved location '{name}'")
+        return True
+        
+    except ValueError as e:
+        log_debug(f"Invalid coordinates for location '{name}': {e}")
+        messagebox.showerror("Invalid Coordinates", str(e))
+        return False
+    except Exception as e:
+        log_debug(f"Error saving location '{name}': {e}")
+        messagebox.showerror("Error", f"Failed to save location: {e}")
+        return False
 
 def load_location_by_name(name):
     """Load location by name"""
@@ -293,6 +474,70 @@ def lat_and_lon():
     settings = load_settings()
     return settings.get("current_lat", ""), settings.get("current_lon", "")
 
+def process_weather_data(forecast_list, is_hourly=False):
+    """Process weather forecast data into DataFrame with common formatting"""
+    try:
+        condition_map = get_weather_condition_map()
+        
+        # Json to pandas
+        df = pd.json_normalize(forecast_list)
+        df.columns = [c.replace('data.', '') for c in df.columns]
+        df['time'] = pd.to_datetime(df['time'])
+        df['cond'] = df['cond'].map(condition_map)
+        
+        if is_hourly:
+            df = df.rename(columns={
+                'time': 'Time',
+                'cond': 'Condition',
+                'rain': 'Rainfall(mm)',
+                'rh': 'Humidity(%)',
+                'ws10m': 'Wind Speed(m/s)',
+                'tc': 'Temperature(°C)'
+            })
+        else:
+            df['Temperature(°C)'] = df['tc_min'].astype(str) + " / " + df['tc_max'].astype(str) + " max"
+            df = df.rename(columns={
+                'time': 'Time',
+                'cond': 'Condition',
+                'rain': 'Rainfall(mm)',
+                'rh': 'Humidity(%)',
+                'ws10m': 'Wind Speed(m/s)'
+            })
+        
+        # Ensure consistent column order
+        df = df[['Time', 'Condition', 'Rainfall(mm)', 'Humidity(%)', 'Temperature(°C)', 'Wind Speed(m/s)']]
+        
+        return df
+        
+    except Exception as e:
+        log_debug(f"Error processing weather data: {e}")
+        raise ValueError(f"Failed to process weather data: {e}")
+
+
+def display_weather_data(df, is_hourly=False):
+    """Display weather data in the treeview"""
+    try:
+        # Clear existing data
+        for i in tree.get_children():
+            tree.delete(i)
+        
+        # Format time based on data type
+        for index, row in df.iterrows():
+            if is_hourly:
+                formatted_time = row['Time'].strftime('%d-%m-%Y %H:%M')
+            else:
+                formatted_time = row['Time'].strftime('%d-%m-%Y')
+            
+            tree.insert("", "end", values=(
+                formatted_time, row['Condition'], row['Rainfall(mm)'], 
+                row['Humidity(%)'], row['Temperature(°C)'], row['Wind Speed(m/s)']
+            ))
+            
+    except Exception as e:
+        log_debug(f"Error displaying weather data: {e}")
+        messagebox.showerror("Display Error", f"Failed to display weather data: {e}")
+
+
 def load_Daily_weather_data():
     """Load daily weather forecast data"""
     settings = load_settings()
@@ -305,6 +550,13 @@ def load_Daily_weather_data():
         messagebox.showwarning("Missing Info", "Please enter latitude, longitude, and API Token!")
         return
 
+    try:
+        # Validate coordinates
+        validate_coordinates(target_lat, target_lon)
+    except ValueError as e:
+        messagebox.showerror("Invalid Coordinates", str(e))
+        return
+
     log_debug(f"Loading daily weather for lat: {target_lat}, lon: {target_lon}")
     
     # API Document "https://data.tmd.go.th/nwpapi/doc/"
@@ -313,46 +565,27 @@ def load_Daily_weather_data():
     headers = {'accept': "application/json", 'authorization': f"Bearer {user_token.strip()}"}
 
     try:
-        # Get data
-        response = requests.get(url, headers=headers, params=querystring)
-        response.raise_for_status()
-        data = response.json()
+        # Get data using consistent API request function
+        data = make_api_request(url, headers=headers, params=querystring)
         forecast_list = data['WeatherForecasts'][0]['forecasts']
         
         log_debug(f"Successfully retrieved {len(forecast_list)} daily forecasts")
 
-        condition_map = {1: "Clear", 2: "Partly cloudy", 3: "Cloudy", 4: "Overcast", 5: "Light rain", 
-                         6: "Moderate rain", 7: "Heavy rain", 8: "Thunderstorm", 9: "Very cold", 
-                         10: "Cold", 11: "Cool", 12: "Very hot"}
-
-        # Json to pandas
-        df = pd.json_normalize(forecast_list)
-        df.columns = [c.replace('data.', '') for c in df.columns]
-        df['Temperature(°C)'] = df['tc_min'].astype(str) + " / " + df['tc_max'].astype(str) + " max"
-        df = df.rename(columns={
-            'time': 'Time',
-            'cond': 'Condition',
-            'rain': 'Rainfall(mm)',
-            'rh': 'Humidity(%)',
-            'ws10m': 'Wind Speed(m/s)'
-        })
-        df = df[['Time', 'Condition', 'Rainfall(mm)', 'Humidity(%)', 'Temperature(°C)', 'Wind Speed(m/s)']]
-        df['Time'] = pd.to_datetime(df['Time'])
-        df['Condition'] = df['Condition'].map(condition_map)
-
-        # Clear and populate treeview
-        for i in tree.get_children(): 
-            tree.delete(i)
-        for index, row in df.iterrows():
-            formatted_time = row['Time'].strftime('%d-%m-%Y')
-            tree.insert("", "end", values=(formatted_time, row['Condition'], row['Rainfall(mm)'], 
-                                           row['Humidity(%)'], row['Temperature(°C)'], row['Wind Speed(m/s)']))
-            
+        # Process and display data
+        df = process_weather_data(forecast_list, is_hourly=False)
+        display_weather_data(df, is_hourly=False)
         log_debug("Daily weather data displayed successfully")
 
-    except Exception as e:
+    except requests.RequestException as e:
         log_debug(f"Failed to get daily weather data: {e}")
-        messagebox.showerror("Error", f"Failed to get data: {e}")   
+        messagebox.showerror("API Error", str(e))
+    except ValueError as e:
+        log_debug(f"Data processing error: {e}")
+        messagebox.showerror("Data Error", str(e))
+    except Exception as e:
+        log_debug(f"Unexpected error loading daily weather: {e}")
+        messagebox.showerror("Error", f"Failed to get daily weather data: {e}")
+
 
 def load_Hourly_weather_data():
     """Load hourly weather forecast data"""
@@ -365,6 +598,13 @@ def load_Hourly_weather_data():
     if not target_lat or not target_lon or not user_token:
         messagebox.showwarning("Missing Info", "Please enter latitude, longitude, and API Token!")
         return
+
+    try:
+        # Validate coordinates
+        validate_coordinates(target_lat, target_lon)
+    except ValueError as e:
+        messagebox.showerror("Invalid Coordinates", str(e))
+        return
     
     log_debug(f"Loading hourly weather for lat: {target_lat}, lon: {target_lon}")
     
@@ -374,51 +614,48 @@ def load_Hourly_weather_data():
     headers = {'accept': "application/json", 'authorization': f"Bearer {user_token.strip()}"}
 
     try:
-        # Get data
-        response = requests.get(url, headers=headers, params=querystring)
-        response.raise_for_status()
-        data = response.json()
+        # Get data using consistent API request function
+        data = make_api_request(url, headers=headers, params=querystring)
         forecast_list = data['WeatherForecasts'][0]['forecasts']
         
         log_debug(f"Successfully retrieved {len(forecast_list)} hourly forecasts")
 
-        condition_map = {1: "Clear", 2: "Partly cloudy", 3: "Cloudy", 4: "Overcast", 5: "Light rain", 
-                         6: "Moderate rain", 7: "Heavy rain", 8: "Thunderstorm", 9: "Very cold", 
-                         10: "Cold", 11: "Cool", 12: "Very hot"}
-
-        # Json to pandas
-        df = pd.json_normalize(forecast_list)
-        df.columns = [c.replace('data.', '') for c in df.columns]
-        df['time'] = pd.to_datetime(df['time'])
-        df['cond'] = df['cond'].map(condition_map)
-        df = df.rename(columns={
-            'time': 'Time',
-            'cond': 'Condition',
-            'rain': 'Rainfall(mm)',
-            'rh': 'Humidity(%)',
-            'ws10m': 'Wind Speed(m/s)'
-        })
-        df.columns = ['Time', 'Condition', 'Rainfall(mm)', 'Humidity(%)', 'Temperature(°C)', 'Wind Speed(m/s)']
-        
-        # Clear and populate treeview
-        for i in tree.get_children(): 
-            tree.delete(i)
-        for index, row in df.iterrows():
-            formatted_time = row['Time'].strftime('%d-%m-%Y %H:%M')
-            tree.insert("", "end", values=(formatted_time, row['Condition'], row['Rainfall(mm)'], 
-                                           row['Humidity(%)'], row['Temperature(°C)'], row['Wind Speed(m/s)']))
-            
+        # Process and display data
+        df = process_weather_data(forecast_list, is_hourly=True)
+        display_weather_data(df, is_hourly=True)
         log_debug("Hourly weather data displayed successfully")
 
-    except Exception as e:
+    except requests.RequestException as e:
         log_debug(f"Failed to get hourly weather data: {e}")
-        messagebox.showerror("Error", f"Failed to get data: {e}")
+        messagebox.showerror("API Error", str(e))
+    except ValueError as e:
+        log_debug(f"Data processing error: {e}")
+        messagebox.showerror("Data Error", str(e))
+    except Exception as e:
+        log_debug(f"Unexpected error loading hourly weather: {e}")
+        messagebox.showerror("Error", f"Failed to get hourly weather data: {e}")
 
 def daily_or_hourly():
     """Handle daily or hourly selection"""
-    # Extract coordinates from Google Maps URL if available
-    if not extract_from_google_maps():
-        return  # Stop if extraction failed or URL is empty
+    # Extract coordinates from Google Maps URL if provided (optional)
+    url = google_maps_url_var.get().strip()
+    if url:
+        if not extract_from_google_maps():
+            return  # Stop if URL extraction failed
+    else:
+        # If no URL, check if coordinates are manually entered
+        lat = lat_var.get().strip()
+        lon = lon_var.get().strip()
+        if not lat or not lon:
+            messagebox.showwarning("Missing Info", "Please enter coordinates or provide a Google Maps URL")
+            return
+        
+        # Validate manually entered coordinates
+        try:
+            validate_coordinates(lat, lon)
+        except ValueError as e:
+            messagebox.showerror("Invalid Coordinates", str(e))
+            return
     
     settings = load_settings()
     mode = daily_hourly_var.get()
@@ -446,12 +683,34 @@ def show_How_to_get_API_key():
     """
     messagebox.showinfo("How to get API key", How_to_get_API_key)
 
+def update_coordinate_status():
+    """Update coordinate status indicator"""
+    try:
+        lat = lat_var.get().strip()
+        lon = lon_var.get().strip()
+        url = google_maps_url_var.get().strip()
+        
+        if lat and lon:
+            try:
+                validate_coordinates(lat, lon)
+                if url:
+                    coord_status_label.config(text="✓ From URL", fg="blue")
+                else:
+                    coord_status_label.config(text="✓ Manual entry", fg="green")
+            except ValueError:
+                coord_status_label.config(text="⚠ Invalid", fg="red")
+        else:
+            coord_status_label.config(text="Enter coordinates", fg="gray")
+    except:
+        coord_status_label.config(text="Ready", fg="green")
+
+
 def extract_from_google_maps():
     """Extract coordinates from Google Maps URL"""
     url = google_maps_url_var.get().strip()
     if not url:
-        messagebox.showwarning("Missing Info", "Please enter a Google Maps URL")
-        return False
+        update_coordinate_status()
+        return True  # No URL provided is OK
     
     try:
         lat, lon = extract_lat_lon_from_google_maps(url)
@@ -465,11 +724,18 @@ def extract_from_google_maps():
         save_settings(settings)
         
         log_debug(f"Extracted coordinates from URL: lat={lat}, lon={lon}")
+        update_coordinate_status()
         return True
         
-    except Exception as e:
+    except ValueError as e:
         log_debug(f"Failed to extract coordinates: {e}")
         messagebox.showerror("Error", f"Failed to extract coordinates: {e}")
+        update_coordinate_status()
+        return False
+    except Exception as e:
+        log_debug(f"Unexpected error extracting coordinates: {e}")
+        messagebox.showerror("Error", f"Unexpected error extracting coordinates: {e}")
+        update_coordinate_status()
         return False
 
 def save_current_location():
@@ -485,9 +751,9 @@ def save_current_location():
     
     if not lat or not lon:
         # Try to extract from URL first
-        extract_from_google_maps()
-        lat = lat_var.get().strip()
-        lon = lon_var.get().strip()
+        if url and extract_from_google_maps():
+            lat = lat_var.get().strip()
+            lon = lon_var.get().strip()
         
     if not lat or not lon:
         messagebox.showwarning("Warning", "Please enter valid coordinates")
@@ -509,6 +775,7 @@ def on_location_selected(event):
     """Handle location selection from dropdown"""
     selected = location_dropdown_var.get()
     if selected == "Custom":
+        update_coordinate_status()
         return
     
     location = load_location_by_name(selected)
@@ -517,6 +784,7 @@ def on_location_selected(event):
         lon_var.set(str(location["lon"]))
         google_maps_url_var.set(location["url"])
         log_debug(f"Loaded location: {location['name']}")
+        update_coordinate_status()
 
 def delete_current_location():
     """Delete currently selected location"""
@@ -556,8 +824,12 @@ def show_log_viewer():
             with open(LOG_FILE, 'r', encoding='utf-8') as f:
                 content = f.read()
                 text_widget.insert("1.0", content)
-        except Exception as e:
+        except IOError as e:
             text_widget.insert("1.0", f"Error reading log file: {e}")
+        except UnicodeDecodeError as e:
+            text_widget.insert("1.0", f"Error decoding log file: {e}")
+        except Exception as e:
+            text_widget.insert("1.0", f"Unexpected error reading log file: {e}")
     else:
         text_widget.insert("1.0", "No log file found.")
     
@@ -595,25 +867,52 @@ location_dropdown.grid(row=0, column=1, padx=10, pady=(0,5))
 location_dropdown.bind("<<ComboboxSelected>>", on_location_selected)
 
 # Google Maps URL (manual extract)
-tk.Label(settings_frame, text="Google Maps URL:", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
+tk.Label(settings_frame, text="Google Maps URL (Optional):", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
 entry_google_maps = tk.Entry(settings_frame, textvariable=google_maps_url_var, width=50, font=("Arial", 9))
 entry_google_maps.grid(row=1, column=1, columnspan=3, padx=10, pady=5, sticky="ew")
 
+# Add a hint label below the URL entry
+url_hint_label = tk.Label(settings_frame, text="Optional: Enter coordinates manually below or paste Google Maps URL", 
+                         font=("Arial", 8), fg="gray")
+url_hint_label.grid(row=2, column=1, columnspan=3, padx=10, pady=(0,5), sticky="w")
+
+# Manual coordinate entry
+tk.Label(settings_frame, text="Manual Coordinates:", font=("Arial", 10)).grid(row=3, column=0, sticky="w", pady=5)
+coord_frame = tk.Frame(settings_frame)
+coord_frame.grid(row=3, column=1, columnspan=3, padx=10, pady=5, sticky="ew")
+
+tk.Label(coord_frame, text="Latitude:").pack(side="left", padx=(0,5))
+entry_lat = tk.Entry(coord_frame, textvariable=lat_var, width=15, font=("Arial", 9))
+entry_lat.pack(side="left", padx=5)
+
+tk.Label(coord_frame, text="Longitude:").pack(side="left", padx=(10,5))
+entry_lon = tk.Entry(coord_frame, textvariable=lon_var, width=15, font=("Arial", 9))
+entry_lon.pack(side="left", padx=5)
+
+# Bind coordinate changes to status update
+lat_var.trace('w', lambda *args: update_coordinate_status())
+lon_var.trace('w', lambda *args: update_coordinate_status())
+google_maps_url_var.trace('w', lambda *args: update_coordinate_status())
+
+# Coordinate status indicator
+coord_status_label = tk.Label(settings_frame, text="Ready", font=("Arial", 8), fg="green")
+coord_status_label.grid(row=3, column=4, padx=10, pady=5)
+
 # Location name and save/remove buttons
-tk.Label(settings_frame, text="Location Name:", font=("Arial", 10)).grid(row=2, column=0, sticky="w", pady=5)
+tk.Label(settings_frame, text="Location Name:", font=("Arial", 10)).grid(row=4, column=0, sticky="w", pady=5)
 entry_location_name = tk.Entry(settings_frame, textvariable=location_name_var, width=25, font=("Arial", 9))
-entry_location_name.grid(row=2, column=1, padx=10, pady=5)
+entry_location_name.grid(row=4, column=1, padx=10, pady=5)
 save_location_btn = tk.Button(settings_frame, text="Save Location", command=save_current_location, bg="#FF9800", fg="white", font=("Arial", 9, "bold"))
-save_location_btn.grid(row=2, column=2, padx=5, pady=5)
+save_location_btn.grid(row=4, column=2, padx=5, pady=5)
 remove_location_btn = tk.Button(settings_frame, text="Remove", command=delete_current_location, bg="#f44336", fg="white", font=("Arial", 9, "bold"))
 remove_location_btn.grid(row=0, column=2, padx=5, pady=(0,5))
 
 # API Key with help button
-tk.Label(settings_frame, text="API Token:", font=("Arial", 10)).grid(row=3, column=0, sticky="w", pady=5)
+tk.Label(settings_frame, text="API Token:", font=("Arial", 10)).grid(row=5, column=0, sticky="w", pady=5)
 entry_api_key = tk.Entry(settings_frame, textvariable=api_key_var, width=50, show="*", font=("Arial", 9))
-entry_api_key.grid(row=3, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
+entry_api_key.grid(row=5, column=1, columnspan=2, padx=10, pady=5, sticky="ew")
 api_help_btn = tk.Button(settings_frame, text="How to get API key", command=show_How_to_get_API_key, bg="#f0f0f0", font=("Arial", 8))
-api_help_btn.grid(row=3, column=3, padx=5, pady=5)
+api_help_btn.grid(row=5, column=3, padx=5, pady=5)
 
 #--------------------Buttons Frame--------------------
 buttons_frame = tk.Frame(root)
@@ -656,6 +955,7 @@ status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
 #--------------------Update UI with saved data--------------------
 update_location_dropdown()
+update_coordinate_status()  # Initialize coordinate status
 
 # Save settings on close
 def on_closing():
