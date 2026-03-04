@@ -48,7 +48,7 @@ def save_current_settings():
 
 def load_weather_data():
 
-    save_current_settings()
+    
 
     if  Daily_hourly.get() == "daily":
         mode = "daily"
@@ -73,7 +73,7 @@ def load_weather_data():
 
     try:
         # Get data
-        response = requests.get(url, headers=headers, params=querystring)
+        response = requests.get(url, headers=headers, params=querystring, timeout=15)
         response.raise_for_status()
         data = response.json()
         forecast_list = data['WeatherForecasts'][0]['forecasts']
@@ -119,6 +119,8 @@ def load_weather_data():
     except Exception as e:
         messagebox.showerror("Error", f"Unexpected error: {e}")  
         return
+    
+    save_current_settings()
 
 
 def show_How_to_get_API_key():
@@ -148,41 +150,25 @@ def extract_lat_lon_from_google_maps(url: str):
     if not url:
         raise ValueError("Empty URL")
 
-    # Expand short URL if needed (maps.app.goo.gl etc.)
-    try:
-        response = requests.get(url, timeout=15, allow_redirects=True)
-        final_url = response.url
-    except:
-        final_url = url  # fallback
+    final_url = url
 
-    # Pattern 1: @lat,lon
-    match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', final_url)
+    # expand Google short link
+    if "maps.app.goo.gl" in url:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0"
+            }
+            response = requests.get(url,headers=headers, timeout=10, allow_redirects=True)
+            final_url = response.url
+        except requests.RequestException:
+            pass
+
+
+    match = re.search(r'(-?\d+\.\d+),\s*([+-]?\d+\.\d+)', final_url)
+
     if match:
         lat = float(match.group(1))
         lon = float(match.group(2))
-        return lat, lon
-
-    # Pattern 2: ?q=lat,lon or &q=lat,lon
-    match = re.search(r'[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)', final_url)
-    if match:
-        lat = float(match.group(1))
-        lon = float(match.group(2))
-        return lat, lon
-
-    # Pattern 3: query=lat,lon
-    match = re.search(r'[?&]query=(-?\d+\.\d+),(-?\d+\.\d+)', final_url)
-    if match:
-        lat = float(match.group(1))
-        lon = float(match.group(2))
-        return lat, lon
-    
-    
-    # Pattern 4: /search/lat,lon or /maps/lat,lon (path-based format after redirect)
-    match = re.search(r'/[-]?(\d+\.\d+),([-+]?\d+\.\d+)(?:\?|$|[^-\d])', final_url)
-    if match:
-        lat = float(match.group(1))
-        lon_str = match.group(2).replace('+', '')
-        lon = float(lon_str)
         return lat, lon
 
     messagebox.showerror("Error", "Latitude/Longitude not found in URL")
