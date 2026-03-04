@@ -33,6 +33,10 @@ def load_saved_settings():
 
 def save_current_settings():
     
+    if entry_token.get() == "" or entry_google_maps.get() == "":
+        messagebox.showwarning("Missing Info", "Please enter all required fields!")
+        return
+    
     settings = {
         "token": entry_token.get(),
         "mode": Daily_hourly.get(),
@@ -41,27 +45,30 @@ def save_current_settings():
     with open(CONFIG_FILE, "w") as f:
         json.dump(settings, f)
 
-def daily_or_hourly():
-    # Automatically save settings every time the user clicks "Get Forecast"
+
+def load_weather_data():
+
     save_current_settings()
-    
+
     if  Daily_hourly.get() == "daily":
-        load_Daily_weather_data()
+        mode = "daily"
+        duration = 10
+        fields = "cond,ws10m,tc_max,tc_min,rh,rain"
     else:
-        load_Hourly_weather_data()
-
-def load_Daily_weather_data():
-    target_lat, target_lon = extract_lat_lon_from_google_maps(entry_google_maps.get().strip())
+        mode = "hourly"
+        duration = 48
+        fields = "cond,ws10m,tc,rh,rain" 
+    
     user_token = entry_token.get()
-
-    #Check if user have input
-    if not target_lat or not target_lon or not user_token:
-        messagebox.showwarning("Missing Info", "Please enter latitude, longitude, and API Token!")
-        return
+    coordinates = extract_lat_lon_from_google_maps(entry_google_maps.get().strip())
+    if coordinates is None:
+        return None
+    target_lat, target_lon = coordinates
+    
 
     # API Document "https://data.tmd.go.th/nwpapi/doc/"
-    url = "https://data.tmd.go.th/nwpapi/v1/forecast/location/daily/at"
-    querystring = {"lat": target_lat, "lon": target_lon, "duration": "10", "fields": "cond,ws10m,tc_max,tc_min,rh,rain"}
+    url = f"https://data.tmd.go.th/nwpapi/v1/forecast/location/{mode}/at"
+    querystring = {"lat": target_lat, "lon": target_lon, "duration": duration, "fields": fields}
     headers = {'accept': "application/json", 'authorization': f"Bearer {user_token.strip()}"}
 
     try:
@@ -78,7 +85,10 @@ def load_Daily_weather_data():
         # Json to pandas
         df = pd.json_normalize(forecast_list)
         df.columns = [c.replace('data.', '') for c in df.columns]
-        df['Temperature(°C)'] = df['tc_min'].astype(str) + " / " + df['tc_max'].astype(str) + " max"
+        if mode == "daily":
+            df['Temperature(°C)'] = df['tc_min'].astype(str) + " °C / " + df['tc_max'].astype(str) + " °C max"
+        else:
+            df['Temperature(°C)'] = df['tc'].astype(str) + " °C"
         df = df.rename(columns={
             'time': 'Time',
             'cond': 'Condition',
@@ -92,65 +102,24 @@ def load_Daily_weather_data():
 
         for i in tree.get_children(): tree.delete(i)
         for index, row in df.iterrows():
-            formatted_time = row['Time'].strftime('%d-%m-%Y')
+            if mode == "daily":
+                formatted_time = row['Time'].strftime('%d-%m-%Y')
+            else:
+                formatted_time = row['Time'].strftime('%d-%m-%Y %H:%M')
             tree.insert("", "end", values=(formatted_time, row['Condition'], row['Rainfall(mm)'], 
                                            row['Humidity(%)'], row['Temperature(°C)'], row['Wind Speed(m/s)']))
             
-
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to get data: {e}")   
-
-def load_Hourly_weather_data():
-    target_lat, target_lon = extract_lat_lon_from_google_maps(entry_google_maps.get().strip())
-    user_token = entry_token.get()
-
-    #Check if user have input
-    if not target_lat or not target_lon or not user_token:
-        messagebox.showwarning("Missing Info", "Please enter latitude, longitude, and API Token!")
-        return
     
-    # API Document "https://data.tmd.go.th/nwpapi/doc/"
-    url = "https://data.tmd.go.th/nwpapi/v1/forecast/location/hourly/at"
-    querystring = {"lat": target_lat, "lon": target_lon, "duration": "48", "fields": "cond,ws10m,tc,rh,rain"}
-    headers = {'accept': "application/json", 'authorization': f"Bearer {user_token.strip()}"}
-
-    try:
-        # Get data
-        response = requests.get(url, headers=headers, params=querystring)
-        response.raise_for_status()
-        data = response.json()
-        forecast_list = data['WeatherForecasts'][0]['forecasts']
-
-        condition_map = {1: "Clear", 2: "Partly cloudy", 3: "Cloudy", 4: "Overcast", 5: "Light rain", 
-                         6: "Moderate rain", 7: "Heavy rain", 8: "Thunderstorm", 9: "Very cold", 
-                         10: "Cold", 11: "Cool", 12: "Very hot"}
-
-        # Json to pandas
-        df = pd.json_normalize(forecast_list)
-        df.columns = [c.replace('data.', '') for c in df.columns]
-        df['time'] = pd.to_datetime(df['time'])
-        df['cond'] = df['cond'].map(condition_map)
-        df = df.rename(columns={
-            'time': 'Time',
-            'cond': 'Condition',
-            'rain': 'Rainfall(mm)',
-            'rh': 'Humidity(%)',
-            'ws10m': 'Wind Speed(m/s)'
-        })
-        df.columns = ['Time', 'Condition', 'Rainfall(mm)', 'Humidity(%)', 'Temperature(°C)', 'Wind Speed(m/s)']
-        
-        
-        for i in tree.get_children(): tree.delete(i)
-        for index, row in df.iterrows():
-            formatted_time = row['Time'].strftime('%d-%m-%Y %H:%M')
-            tree.insert("", "end", values=(formatted_time, row['Condition'], row['Rainfall(mm)'], 
-                                           row['Humidity(%)'], row['Temperature(°C)'], row['Wind Speed(m/s)']))
-            
-
-        
-
+    except requests.RequestException as e:
+        messagebox.showerror("Network Error", f"check your internet connection and API KEY")
+        return
+    except (KeyError, IndexError) as e:
+        messagebox.showerror("Data Error", f"Invalid API response: {e}")
+        return
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to get data: {e}")
+        messagebox.showerror("Error", f"Unexpected error: {e}")  
+        return
+
 
 def show_How_to_get_API_key():
     How_to_get_API_key = """
@@ -158,9 +127,6 @@ def show_How_to_get_API_key():
     and follow Introduction
     """
     messagebox.showinfo("How to get API key", How_to_get_API_key)
-
-
-
 
 
 def extract_lat_lon_from_google_maps(url: str):
@@ -184,7 +150,7 @@ def extract_lat_lon_from_google_maps(url: str):
 
     # Expand short URL if needed (maps.app.goo.gl etc.)
     try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
+        response = requests.get(url, timeout=15, allow_redirects=True)
         final_url = response.url
     except:
         final_url = url  # fallback
@@ -219,7 +185,8 @@ def extract_lat_lon_from_google_maps(url: str):
         lon = float(lon_str)
         return lat, lon
 
-    raise ValueError("Latitude/Longitude not found in URL")
+    messagebox.showerror("Error", "Latitude/Longitude not found in URL")
+    return None
 
 
 
@@ -258,8 +225,8 @@ entry_token.grid(row=1, column=1, columnspan=4, padx=5)
 
 Daily_hourly = tk.StringVar()
 Daily_hourly.set(saved_data.get("mode","daily"))           # Load saved or use default
-tk.Radiobutton(input_frame,text="Daily",variable=Daily_hourly,value="daily").grid(row=0,column=4)
-tk.Radiobutton(input_frame,text="Hourly",variable=Daily_hourly,value="hourly").grid(row=0,column=5)
+tk.Radiobutton(input_frame,text="Daily",variable=Daily_hourly,value="daily").grid(row=0,column=3)
+tk.Radiobutton(input_frame,text="Hourly",variable=Daily_hourly,value="hourly").grid(row=0,column=4)
 
 
 #--------------------Buttons--------------------
@@ -268,7 +235,7 @@ tk.Radiobutton(input_frame,text="Hourly",variable=Daily_hourly,value="hourly").g
 btn_frame = tk.Frame(root)
 btn_frame.pack(pady=5)
 
-refresh_btn = tk.Button(btn_frame, text="Get Forecast", command=daily_or_hourly, bg="#2196F3", fg="white", font=("Arial", 10, "bold"))
+refresh_btn = tk.Button(btn_frame, text="Get Forecast", command=load_weather_data, bg="#2196F3", fg="white", font=("Arial", 10, "bold"))
 refresh_btn.grid(row=0, column=0, padx=5)
 
 readme_btn = tk.Button(input_frame, text="How to get API key",command=show_How_to_get_API_key, bg="#f0f0f0", font=("Arial", 8))
