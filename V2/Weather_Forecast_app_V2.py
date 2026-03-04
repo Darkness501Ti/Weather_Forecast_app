@@ -1,102 +1,3 @@
-"""""
-
-
-
-''''''''''''''''''''''''''''''''how user experience''''''''''''''''''''''''''''''''
-open program -> setup or load -> get Forecast -> see the table data -> clos program
-get struggling? 
-1. how to get api key?
-2. how to get lat and lon?
-3.error? and etc.
-
-
-''''''''''''''''''''''''''''''''Main program logic''''''''''''''''''''''''''''''''
-Main
-open program -> load setting.json Function or 'set lat & lon' and 'set API KEY' and select'daily or hourly mode' -> get Forecast data and -> data to table -> close the program
-
-Background Process
-save setting.json Function (Save 'multiple lat&lon', 'daily or hourly mode', 'API KEY' )
-
-
-Optional
-save or set lat & lon : multiple lat&lon load or set lat & lon -> multiple lat&lon save
-daily or hourly mode
-how to get API  
-how to get lat&lon 
-Debug and log 
-
-
-
-'''''''''''''''''''''''''''''Progression  '*' for Note'''''''''''''''''''''''''''''
-Logic (yes is done, no is not done)
-
-First priority
-##setting config
-load setting.json Function                                          no
-save setting.json Function                                          no
-daily or hourly mode                                                no *
-set lat & lon                                                       no
-set API KEY                                                         no
-
-
-##data logic
-set lat & lon                                                       no
-set API KEY                                                         no
-get Forecast data                                                   yes                   
-data to table                                                       no **
-multiple lat&lon                                                    no ***
-multiple lat&lon load                                               no ***
-multiple lat&lon save                                               no ***
-
-##UI
-set API KEY (input_box)                                             no 
-set lat & lon (input_box)                                           no
-load lat & lon (optionmenu)                                         no
-get Forecast Function (button)                                      no
-show data to Table (Table)                                          no
-multiple lat&lon      (optionmenu)                                  no ***
-multiple lat&lon save (button)                                      no ***
-
-
-
-Second priority
-## logic
-how to get API                                                      yes
-how to get lat&lon                                                  no
-save and load Function                                              no
-
-
-##UI
-how to get API (button)                                             no
-how to get lat&lon (button)                                         no
-save and load Function (button)                                     no
-
-Third priority
-##Logic
-Debug and log                                                       no
-
-##UI
-Debug and log (button) to (New Window Table)                        no
-
-
------------------Note for Function Detail
-*
-select daily or hourly
-    max daily  is duration is 10
-    max hourly  is duration is 48
-
-**
-show Table
-    make data form 'load data Function' to 'show Table'
-
-***
-multiple lat&lon save unlimited locations
-
-
-
-
-"""""
-
 import requests
 import pandas as pd
 import json
@@ -107,10 +8,8 @@ import re
 import logging
 from datetime import datetime
 import base64
-import hashlib
 from cryptography.fernet import Fernet
 import threading
-import msvcrt  # Windows file locking
 from logging.handlers import RotatingFileHandler
 
 CONFIG_FILE = "settings.json"
@@ -119,6 +18,10 @@ ENCRYPTION_KEY_FILE = ".encryption_key"
 MAX_LOG_SIZE = 1024 * 1024  # 1MB
 BACKUP_COUNT = 3
 REQUEST_TIMEOUT = 10  # seconds
+
+# Global settings cache for performance
+_settings_cache = None
+_coordinate_validation_cache = {}
 
 
 class FileLock:
@@ -337,7 +240,7 @@ def setup_logging():
 
 def log_debug(message):
     """Log debug message to file (optional)"""
-    settings = load_settings()
+    settings = get_settings()  # Use cached settings for performance
     debug_mode = settings.get("debug_mode", False)
     
     if debug_mode:
@@ -346,6 +249,35 @@ def log_debug(message):
             print(f"LOG: {message}")
         except:
             pass
+
+def get_settings():
+    """Get settings from cache or load from file"""
+    global _settings_cache
+    if _settings_cache is None:
+        _settings_cache = load_settings()
+    return _settings_cache
+
+def save_and_cache_settings(settings):
+    """Save settings and update cache"""
+    global _settings_cache
+    save_settings(settings)
+    _settings_cache = settings.copy()
+
+def validate_coordinates_cached(lat_str, lon_str):
+    """Validate coordinates with caching"""
+    cache_key = f"{lat_str},{lon_str}"
+    global _coordinate_validation_cache
+    
+    if cache_key in _coordinate_validation_cache:
+        return _coordinate_validation_cache[cache_key]
+    
+    try:
+        result = validate_coordinates(lat_str, lon_str)
+        _coordinate_validation_cache[cache_key] = result
+        return result
+    except ValueError as e:
+        _coordinate_validation_cache[cache_key] = e
+        raise e
 
 def load_settings():
     """Load settings from JSON file with file locking and API key decryption"""
@@ -421,10 +353,10 @@ def save_settings(settings):
 def save_location(name, lat, lon, url=""):
     """Save location to the list with validation"""
     try:
-        # Validate coordinates
-        lat_float, lon_float = validate_coordinates(str(lat), str(lon))
+        # Validate coordinates (cached)
+        lat_float, lon_float = validate_coordinates_cached(str(lat), str(lon))
         
-        settings = load_settings()
+        settings = get_settings()
         new_location = {
             "name": name,
             "lat": lat_float,
@@ -432,7 +364,7 @@ def save_location(name, lat, lon, url=""):
             "url": url
         }
         settings["locations"]["saved_locations"].append(new_location)
-        save_settings(settings)
+        save_and_cache_settings(settings)
         log_debug(f"Saved location '{name}'")
         return True
         
@@ -447,19 +379,19 @@ def save_location(name, lat, lon, url=""):
 
 def load_location_by_name(name):
     """Load location by name"""
-    settings = load_settings()
+    settings = get_settings()
     for location in settings["locations"]["saved_locations"]:
         if location["name"] == name:
             settings["current_lat"] = str(location["lat"])
             settings["current_lon"] = str(location["lon"])
-            save_settings(settings)
+            save_and_cache_settings(settings)
             log_debug(f"Loaded location '{location['name']}'")
             return location
     return None
 
 def get_saved_locations():
     """Get list of saved locations for dropdown"""
-    settings = load_settings()
+    settings = get_settings()
     locations = []
     for location in settings["locations"]["saved_locations"]:
         if location["name"] and location["lat"] != 0 and location["lon"] != 0:
@@ -469,19 +401,19 @@ def get_saved_locations():
 
 def delete_location_by_name(name):
     """Delete location by name"""
-    settings = load_settings()
+    settings = get_settings()
     saved_locations = settings["locations"]["saved_locations"]
     for i, location in enumerate(saved_locations):
         if location["name"] == name:
             del saved_locations[i]
-            save_settings(settings)
+            save_and_cache_settings(settings)
             log_debug(f"Deleted location '{name}'")
             return True
     return False
 
 def lat_and_lon():
-    '''Get current lat/lon from settings'''
-    settings = load_settings()
+    '''Get current lat/lon from settings (cached)'''
+    settings = get_settings()
     return settings.get("current_lat", ""), settings.get("current_lon", "")
 
 def process_weather_data(forecast_list, is_hourly=False):
@@ -548,9 +480,9 @@ def display_weather_data(df, is_hourly=False):
         messagebox.showerror("Display Error", f"Failed to display weather data: {e}")
 
 
-def load_Daily_weather_data():
-    """Load daily weather forecast data"""
-    settings = load_settings()
+def load_weather_data(is_hourly=False):
+    """Load weather forecast data (unified daily/hourly function)"""
+    settings = get_settings()
     target_lat = settings.get("current_lat", "")
     target_lon = settings.get("current_lon", "")
     user_token = settings.get("api_key", "")
@@ -561,17 +493,21 @@ def load_Daily_weather_data():
         return
 
     try:
-        # Validate coordinates
-        validate_coordinates(target_lat, target_lon)
+        # Validate coordinates (cached)
+        validate_coordinates_cached(target_lat, target_lon)
     except ValueError as e:
         messagebox.showerror("Invalid Coordinates", str(e))
         return
 
-    log_debug(f"Loading daily weather for lat: {target_lat}, lon: {target_lon}")
+    mode = "hourly" if is_hourly else "daily"
+    duration = "48" if is_hourly else "10"
+    fields = "cond,ws10m,tc,rh,rain" if is_hourly else "cond,ws10m,tc_max,tc_min,rh,rain"
+    
+    log_debug(f"Loading {mode} weather for lat: {target_lat}, lon: {target_lon}")
     
     # API Document "https://data.tmd.go.th/nwpapi/doc/"
-    url = "https://data.tmd.go.th/nwpapi/v1/forecast/location/daily/at"
-    querystring = {"lat": target_lat, "lon": target_lon, "duration": "10", "fields": "cond,ws10m,tc_max,tc_min,rh,rain"}
+    url = f"https://data.tmd.go.th/nwpapi/v1/forecast/location/{mode}/at"
+    querystring = {"lat": target_lat, "lon": target_lon, "duration": duration, "fields": fields}
     headers = {'accept': "application/json", 'authorization': f"Bearer {user_token.strip()}"}
 
     try:
@@ -579,71 +515,39 @@ def load_Daily_weather_data():
         data = make_api_request(url, headers=headers, params=querystring)
         forecast_list = data['WeatherForecasts'][0]['forecasts']
         
-        log_debug(f"Successfully retrieved {len(forecast_list)} daily forecasts")
+        log_debug(f"Successfully retrieved {len(forecast_list)} {mode} forecasts")
 
         # Process and display data
-        df = process_weather_data(forecast_list, is_hourly=False)
-        display_weather_data(df, is_hourly=False)
-        log_debug("Daily weather data displayed successfully")
+        df = process_weather_data(forecast_list, is_hourly=is_hourly)
+        display_weather_data(df, is_hourly=is_hourly)
+        log_debug(f"{mode.capitalize()} weather data displayed successfully")
 
     except requests.RequestException as e:
-        log_debug(f"Failed to get daily weather data: {e}")
+        log_debug(f"Failed to get {mode} weather data: {e}")
         messagebox.showerror("API Error", str(e))
     except ValueError as e:
         log_debug(f"Data processing error: {e}")
         messagebox.showerror("Data Error", str(e))
     except Exception as e:
-        log_debug(f"Unexpected error loading daily weather: {e}")
-        messagebox.showerror("Error", f"Failed to get daily weather data: {e}")
+        log_debug(f"Unexpected error loading {mode} weather: {e}")
+        messagebox.showerror("Error", f"Failed to get {mode} weather data: {e}")
 
-
-def load_Hourly_weather_data():
-    """Load hourly weather forecast data"""
-    settings = load_settings()
-    target_lat = settings.get("current_lat", "")
-    target_lon = settings.get("current_lon", "")
-    user_token = settings.get("api_key", "")
-
-    # Check if user has input
-    if not target_lat or not target_lon or not user_token:
-        messagebox.showwarning("Missing Info", "Please enter latitude, longitude, and API Token!")
-        return
-
-    try:
-        # Validate coordinates
-        validate_coordinates(target_lat, target_lon)
-    except ValueError as e:
-        messagebox.showerror("Invalid Coordinates", str(e))
-        return
+def load_weather_data_async(is_hourly=False):
+    """Load weather data asynchronously to prevent UI freezing"""
+    def _load_data():
+        try:
+            load_weather_data(is_hourly=is_hourly)
+        except Exception as e:
+            log_debug(f"Async weather loading error: {e}")
+            # Show error on main thread
+            root.after(0, lambda: messagebox.showerror("Error", f"Failed to load weather data: {e}"))
     
-    log_debug(f"Loading hourly weather for lat: {target_lat}, lon: {target_lon}")
-    
-    # API Document "https://data.tmd.go.th/nwpapi/doc/"
-    url = "https://data.tmd.go.th/nwpapi/v1/forecast/location/hourly/at"
-    querystring = {"lat": target_lat, "lon": target_lon, "duration": "48", "fields": "cond,ws10m,tc,rh,rain"}
-    headers = {'accept': "application/json", 'authorization': f"Bearer {user_token.strip()}"}
+    # Start loading in background thread
+    threading.Thread(target=_load_data, daemon=True).start()
+    log_debug(f"Started async {'hourly' if is_hourly else 'daily'} weather loading")
 
-    try:
-        # Get data using consistent API request function
-        data = make_api_request(url, headers=headers, params=querystring)
-        forecast_list = data['WeatherForecasts'][0]['forecasts']
-        
-        log_debug(f"Successfully retrieved {len(forecast_list)} hourly forecasts")
 
-        # Process and display data
-        df = process_weather_data(forecast_list, is_hourly=True)
-        display_weather_data(df, is_hourly=True)
-        log_debug("Hourly weather data displayed successfully")
 
-    except requests.RequestException as e:
-        log_debug(f"Failed to get hourly weather data: {e}")
-        messagebox.showerror("API Error", str(e))
-    except ValueError as e:
-        log_debug(f"Data processing error: {e}")
-        messagebox.showerror("Data Error", str(e))
-    except Exception as e:
-        log_debug(f"Unexpected error loading hourly weather: {e}")
-        messagebox.showerror("Error", f"Failed to get hourly weather data: {e}")
 
 def daily_or_hourly():
     """Handle daily or hourly selection"""
@@ -660,29 +564,25 @@ def daily_or_hourly():
             messagebox.showwarning("Missing Info", "Please enter coordinates or provide a Google Maps URL")
             return
         
-        # Validate manually entered coordinates
+        # Validate manually entered coordinates (cached)
         try:
-            validate_coordinates(lat, lon)
+            validate_coordinates_cached(lat, lon)
         except ValueError as e:
             messagebox.showerror("Invalid Coordinates", str(e))
             return
     
-    settings = load_settings()
+    settings = get_settings()
     mode = daily_hourly_var.get()
     settings["mode"] = mode
     settings["api_key"] = api_key_var.get()  # Save API key when getting forecast
     settings["current_lat"] = lat_var.get()
     settings["current_lon"] = lon_var.get()
-    save_settings(settings)
+    save_and_cache_settings(settings)
     log_debug("API key and settings saved before getting forecast")
     
-    if mode == "daily":
-        load_Daily_weather_data()
-    else:
-        load_Hourly_weather_data()
-
-
-
+    # Use async weather loading for better UI responsiveness
+    is_hourly = (mode == "hourly")
+    load_weather_data_async(is_hourly=is_hourly)
 
 def show_How_to_get_API_key():
     """Show API key instructions"""
@@ -702,7 +602,7 @@ def update_coordinate_status():
         
         if lat and lon:
             try:
-                validate_coordinates(lat, lon)
+                validate_coordinates_cached(lat, lon)
                 if url:
                     coord_status_label.config(text="✓ From URL", fg="blue")
                 else:
@@ -713,6 +613,12 @@ def update_coordinate_status():
             coord_status_label.config(text="Enter coordinates", fg="gray")
     except:
         coord_status_label.config(text="Ready", fg="green")
+
+def debounced_status_update(*args):
+    """Debounced coordinate status update to improve performance"""
+    if hasattr(debounced_status_update, 'timer'):
+        root.after_cancel(debounced_status_update.timer)
+    debounced_status_update.timer = root.after(300, update_coordinate_status)
 
 
 def extract_from_google_maps():
@@ -727,11 +633,11 @@ def extract_from_google_maps():
         lat_var.set(str(lat))
         lon_var.set(str(lon))
         
-        # Update settings
-        settings = load_settings()
+        # Update settings using cache
+        settings = get_settings()
         settings["current_lat"] = str(lat)
         settings["current_lon"] = str(lon)
-        save_settings(settings)
+        save_and_cache_settings(settings)
         
         log_debug(f"Extracted coordinates from URL: lat={lat}, lon={lon}")
         update_coordinate_status()
@@ -769,8 +675,8 @@ def save_current_location():
         messagebox.showwarning("Warning", "Please enter valid coordinates")
         return
     
-    # Check if location name already exists
-    settings = load_settings()
+    # Check if location name already exists (using cache)
+    settings = get_settings()
     for location in settings["locations"]["saved_locations"]:
         if location["name"] == name:
             messagebox.showwarning("Warning", f"Location '{name}' already exists")
@@ -817,9 +723,9 @@ def update_location_dropdown():
 
 def toggle_debug_mode():
     """Handle debug mode toggle"""
-    settings = load_settings()
+    settings = get_settings()
     settings["debug_mode"] = debug_mode_var.get()
-    save_settings(settings)
+    save_and_cache_settings(settings)
     
     if debug_mode_var.get():
         setup_logging()  # Enable logging
@@ -832,7 +738,7 @@ def toggle_debug_mode():
         messagebox.showinfo("Debug Mode", "Debug mode disabled. Logging stopped.")
 
 def show_log_viewer():
-    settings = load_settings()
+    settings = get_settings()
     debug_mode = settings.get("debug_mode", False)
     
     if not debug_mode:
@@ -922,10 +828,10 @@ tk.Label(coord_frame, text="Longitude:").pack(side="left", padx=(10,5))
 entry_lon = tk.Entry(coord_frame, textvariable=lon_var, width=15, font=("Arial", 9))
 entry_lon.pack(side="left", padx=5)
 
-# Bind coordinate changes to status update
-lat_var.trace('w', lambda *args: update_coordinate_status())
-lon_var.trace('w', lambda *args: update_coordinate_status())
-google_maps_url_var.trace('w', lambda *args: update_coordinate_status())
+# Bind coordinate changes to debounced status update
+lat_var.trace('w', debounced_status_update)
+lon_var.trace('w', debounced_status_update)
+google_maps_url_var.trace('w', debounced_status_update)
 
 # Coordinate status indicator
 coord_status_label = tk.Label(settings_frame, text="Ready", font=("Arial", 8), fg="green")
@@ -1002,13 +908,13 @@ update_coordinate_status()  # Initialize coordinate status
 
 # Save settings on close
 def on_closing():
-    settings = load_settings()
+    settings = get_settings()
     settings["current_lat"] = lat_var.get()
     settings["current_lon"] = lon_var.get()
     settings["api_key"] = api_key_var.get()
     settings["mode"] = daily_hourly_var.get()
     settings["debug_mode"] = debug_mode_var.get()
-    save_settings(settings)
+    save_and_cache_settings(settings)
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_closing)
